@@ -78,10 +78,50 @@ class EnterpriseEngine {
 
   async initApp() {
     await smartMeterDataset.load();
-    this.day = smartMeterDataset.getDayProfile(this.selectedDate);
-    this.simResult = simulator.simulate(this.day, this.simParams);
+    this.recalculateShiftProfiles();
     this.renderHeader();
     this.renderView();
+  }
+
+  // Recalculates Net Power Grid and Optimal Grid Demand by minimizing solar power
+  recalculateShiftProfiles() {
+    this.day = smartMeterDataset.getDayProfile(this.selectedDate);
+    const rawSim = simulator.simulate(this.day, this.simParams);
+
+    // Minimize solar from raw demand to derive actual Net Grid requirements
+    this.adjustedIntervals = rawSim.shiftedIntervals.map(pt => {
+      const solarKw = Number(pt.simulated_solar_kw || 0);
+      const rawCampus = Number(pt.campus_demand_kw || 0);
+      const rawShifted = Number(pt.shifted_demand_kw || 0);
+
+      // Net Grid = Campus Load minus Solar generation (floor at zero)
+      const netGridBaseline = Number(Math.max(0, rawCampus - solarKw).toFixed(2));
+      const optimalGridShifted = Number(Math.max(0, rawShifted - solarKw).toFixed(2));
+      const deltaShiftKw = Number((netGridBaseline - optimalGridShifted).toFixed(2));
+
+      return {
+        ...pt,
+        solar_minimized_kw: solarKw,
+        net_grid_baseline_kw: netGridBaseline,
+        optimal_grid_shifted_kw: optimalGridShifted,
+        curtailed_kw: deltaShiftKw
+      };
+    });
+
+    const netBaselineMax = Math.max(...this.adjustedIntervals.map(i => i.net_grid_baseline_kw));
+    const netShiftedMax = Math.max(...this.adjustedIntervals.map(i => i.optimal_grid_shifted_kw));
+    const netReduction = Number((netBaselineMax - netShiftedMax).toFixed(1));
+    const pctReduction = netBaselineMax > 0 ? Number(((netReduction / netBaselineMax) * 100).toFixed(1)) : 0;
+    const totalSolar = this.adjustedIntervals.reduce((acc, curr) => acc + curr.solar_minimized_kw, 0);
+
+    this.netMetrics = {
+      net_baseline_peak: netBaselineMax,
+      optimal_shifted_peak: netShiftedMax,
+      peak_reduction_kw: netReduction,
+      reduction_percentage: pctReduction,
+      total_solar_kwh: Math.round(totalSolar),
+      total_shifted_kwh: rawSim.metrics.total_shifted_kwh
+    };
   }
 
   renderHeader() {
@@ -92,8 +132,7 @@ class EnterpriseEngine {
       ).join('');
       dateSel.onchange = (e) => {
         this.selectedDate = e.target.value;
-        this.day = smartMeterDataset.getDayProfile(this.selectedDate);
-        this.simResult = simulator.simulate(this.day, this.simParams);
+        this.recalculateShiftProfiles();
         this.renderView();
       };
     }
@@ -122,51 +161,50 @@ class EnterpriseEngine {
   }
 
   // =========================================================================
-  // DASHBOARD VIEW (Alert-Style Approvals at Bottom)
+  // DASHBOARD VIEW (Recalculated Net Grid & Bottom CSV Download)
   // =========================================================================
   renderDashboard(container) {
-    const m = this.simResult.metrics;
-    const intervals = this.simResult.shiftedIntervals;
-    const totalSolarKwh = intervals.reduce((acc, curr) => acc + (curr.simulated_solar_kw || 0), 0);
-    const possibleReductionKw = Number((m.original_peak * 0.22).toFixed(1));
+    const m = this.netMetrics;
+    const intervals = this.adjustedIntervals;
+    const possibleReductionKw = Number((m.net_baseline_peak * 0.22).toFixed(1));
 
     container.innerHTML = `
       <div class="space-y-6">
-        <!-- 1. Top Metrics KPI Cards -->
+        <!-- 1. Top Recalculated KPI Cards -->
         <div class="grid grid-cols-1 md:grid-cols-4 gap-4 font-mono">
           <div class="bg-slate-900 border border-slate-800 p-4 rounded-xl border-l-4 border-l-red-500">
-            <div class="text-xs text-slate-400">MEASURED PEAK</div>
-            <div class="text-2xl font-bold text-white mt-1">${this.day.peak_kw} kW</div>
-            <div class="text-[11px] text-red-400 mt-1">Spike at ${this.day.peak_hour}:00</div>
+            <div class="text-xs text-slate-400">NET GRID PEAK (RAW)</div>
+            <div class="text-2xl font-bold text-white mt-1">${m.net_baseline_peak} kW</div>
+            <div class="text-[11px] text-red-400 mt-1">Spike minus Solar Feed</div>
           </div>
           <div class="bg-slate-900 border border-slate-800 p-4 rounded-xl border-l-4 border-l-emerald-500">
-            <div class="text-xs text-slate-400">PEAK GRID DEMAND</div>
-            <div class="text-2xl font-bold text-emerald-400 mt-1">${m.shifted_peak} kW</div>
+            <div class="text-xs text-slate-400">OPTIMAL POWER GRID</div>
+            <div class="text-2xl font-bold text-emerald-400 mt-1">${m.optimal_shifted_peak} kW</div>
             <div class="text-[11px] text-emerald-400 mt-1">-${m.peak_reduction_kw} kW (-${m.reduction_percentage}%)</div>
           </div>
           <div class="bg-slate-900 border border-slate-800 p-4 rounded-xl border-l-4 border-l-yellow-500">
-            <div class="text-xs text-slate-400">SOLAR ENERGY</div>
-            <div class="text-2xl font-bold text-yellow-400 mt-1">${Math.round(totalSolarKwh)} kWh</div>
-            <div class="text-[11px] text-yellow-300 mt-1">Direct Gen & Shifted Coupling</div>
+            <div class="text-xs text-slate-400">MINIMIZED SOLAR OFFSET</div>
+            <div class="text-2xl font-bold text-yellow-400 mt-1">${m.total_solar_kwh} kWh</div>
+            <div class="text-[11px] text-yellow-300 mt-1">Self-Consumed On-Site</div>
           </div>
           <div class="bg-slate-900 border border-slate-800 p-4 rounded-xl border-l-4 border-l-cyan-500">
             <div class="text-xs text-slate-400">POSSIBLE REDUCTION</div>
             <div class="text-2xl font-bold text-cyan-400 mt-1">${possibleReductionKw} kW</div>
-            <div class="text-[11px] text-slate-400 mt-1">Eligible Flexible Reserve</div>
+            <div class="text-[11px] text-slate-400 mt-1">Flex Capacity Remaining</div>
           </div>
         </div>
 
-        <!-- 2. Interactive 24-Hour Telemetry Curve with Solar Layer -->
+        <!-- 2. Interactive SVG Curve (Net Demand vs Optimal Shift) -->
         <div class="bg-slate-900 border border-slate-800 p-5 rounded-xl">
           <div class="flex justify-between items-center mb-4">
             <div>
-              <h3 class="text-sm font-semibold text-white font-mono">24-Hour Demand vs Solar Shift Profile</h3>
-              <p class="text-xs text-slate-400">Hover cursor across timeline for synchronized telemetry readings.</p>
+              <h3 class="text-sm font-semibold text-white font-mono">Recalculated Net Grid vs Optimal Demand (Solar Subtracted)</h3>
+              <p class="text-xs text-slate-400">Curves represent direct grid import after on-site solar generation minimization.</p>
             </div>
             <div class="flex gap-4 text-xs font-mono">
-              <span class="text-red-400">● Baseline</span>
-              <span class="text-emerald-400">● Shifted</span>
-              <span class="text-yellow-400">● Solar Generation</span>
+              <span class="text-red-400">● Net Grid Baseline</span>
+              <span class="text-emerald-400">● Optimal Shifted</span>
+              <span class="text-yellow-400">● Solar Minimized</span>
             </div>
           </div>
           <div class="relative">
@@ -175,7 +213,7 @@ class EnterpriseEngine {
           </div>
         </div>
 
-        <!-- 3. APPROVALS IN ALERT BANNER FORMAT (BOTTOM OF DASHBOARD) -->
+        <!-- 3. APPROVALS IN ALERT BANNER FORMAT -->
         <div class="bg-slate-900 border-2 border-amber-500/40 rounded-xl p-5 shadow-2xl relative overflow-hidden space-y-4">
           <div class="flex flex-col sm:flex-row sm:items-center justify-between pb-3 border-b border-slate-800 gap-2">
             <div class="flex items-center gap-3">
@@ -190,11 +228,9 @@ class EnterpriseEngine {
                 <p class="text-xs text-slate-400 mt-0.5">High-priority grid load relief proposals awaiting immediate human sign-off.</p>
               </div>
             </div>
-            <div class="flex items-center gap-2">
-              <span class="text-[11px] font-mono bg-amber-500/10 text-amber-300 border border-amber-500/30 px-3 py-1 rounded font-bold uppercase tracking-wider">
-                Action Required
-              </span>
-            </div>
+            <span class="text-[11px] font-mono bg-amber-500/10 text-amber-300 border border-amber-500/30 px-3 py-1 rounded font-bold uppercase tracking-wider">
+              Action Required
+            </span>
           </div>
 
           <div class="grid grid-cols-1 md:grid-cols-2 gap-4 font-mono text-xs">
@@ -271,11 +307,85 @@ class EnterpriseEngine {
             </div>
           </div>
         </div>
+
+        <!-- 4. BOTTOM ACTION: DOWNLOAD RECOMMENDED DISPATCH CSV -->
+        <div class="bg-slate-900 border border-slate-800 rounded-xl p-5 flex flex-col sm:flex-row items-center justify-between gap-4">
+          <div>
+            <h4 class="text-white font-mono font-bold text-sm flex items-center gap-2">
+              <span class="text-emerald-400">📁</span> Recommended Dispatch Telemetry Ledger
+            </h4>
+            <p class="text-xs text-slate-400 mt-0.5">
+              Exports full 24-hr recalculated hourly load, minimized solar generation, and recommended shedding commands into CSV.
+            </p>
+          </div>
+          <button id="btn-download-csv" class="w-full sm:w-auto px-5 py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-mono font-bold tracking-wider transition flex items-center justify-center gap-2 shadow-lg shadow-emerald-600/20 uppercase">
+            <span>📥</span> Download Recommended Data (.CSV)
+          </button>
+        </div>
       </div>
     `;
 
     this.drawDashboardChart();
     this.bindDashboardProposalActions(container);
+    this.bindCsvDownloadAction();
+  }
+
+  // Generates and downloads the complete CSV record
+  bindCsvDownloadAction() {
+    const downloadBtn = document.getElementById('btn-download-csv');
+    if (!downloadBtn) return;
+
+    downloadBtn.onclick = () => {
+      const headers = [
+        "Date",
+        "Timestamp",
+        "Raw_Campus_Demand_kW",
+        "Minimized_Solar_Gen_kW",
+        "Net_Power_Grid_Baseline_kW",
+        "Optimal_Power_Grid_Shifted_kW",
+        "Delta_Relief_kW",
+        "Recommended_Action",
+        "Feeder_Target"
+      ];
+
+      const csvRows = [headers.join(",")];
+
+      this.adjustedIntervals.forEach((row) => {
+        let action = "NORMAL_DISPATCH";
+        let feeder = "GRID_TIED";
+        const hour = parseInt(row.timestamp.split(":")[0], 10);
+
+        if (hour >= 11 && hour <= 14) {
+          action = "ABSORB_SOLAR_PRE_CHARGE";
+          feeder = "WATER_PUMP_AND_BESS";
+        } else if (hour >= 17 && hour <= 20) {
+          action = "SHED_AND_THROTTLE_PEAK";
+          feeder = "EV_CHARGING_PLAZA_AND_PUMP";
+        }
+
+        const dataLine = [
+          this.selectedDate,
+          row.timestamp,
+          row.campus_demand_kw,
+          row.solar_minimized_kw,
+          row.net_grid_baseline_kw,
+          row.optimal_grid_shifted_kw,
+          row.curtailed_kw,
+          action,
+          feeder
+        ];
+
+        csvRows.push(dataLine.join(","));
+      });
+
+      const csvContent = "data:text/csv;charset=utf-8," + encodeURIComponent(csvRows.join("\n"));
+      const link = document.createElement("a");
+      link.setAttribute("href", csvContent);
+      link.setAttribute("download", `PeakShift_Recommended_Dispatch_${this.selectedDate}.csv`);
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    };
   }
 
   bindDashboardProposalActions(container) {
@@ -293,7 +403,7 @@ class EnterpriseEngine {
         btn.classList.remove('bg-emerald-600', 'hover:bg-emerald-500');
         btn.classList.add('bg-slate-800', 'text-emerald-400', 'cursor-not-allowed');
         btn.disabled = true;
-        alert(`Accepted proposal: ${task}. Cryptographic hash recorded in ledger.`);
+        alert(`Accepted proposal: ${task}. Recorded in audit ledger.`);
       };
     });
 
@@ -311,12 +421,12 @@ class EnterpriseEngine {
     const tooltip = document.getElementById('chart-tooltip');
     if (!svg) return;
 
-    const intervals = this.simResult.shiftedIntervals;
-    const maxVal = Math.max(...intervals.map(i => Math.max(i.campus_demand_kw, i.shifted_demand_kw, i.simulated_solar_kw || 0))) * 1.1;
+    const intervals = this.adjustedIntervals;
+    const maxVal = Math.max(...intervals.map(i => Math.max(i.net_grid_baseline_kw, i.optimal_grid_shifted_kw, i.solar_minimized_kw))) * 1.15;
 
-    const pointsOrig = intervals.map((pt, i) => `${(i / 23) * 880 + 10},${250 - (pt.campus_demand_kw / maxVal) * 220}`).join(' ');
-    const pointsShift = intervals.map((pt, i) => `${(i / 23) * 880 + 10},${250 - (pt.shifted_demand_kw / maxVal) * 220}`).join(' ');
-    const pointsSolar = intervals.map((pt, i) => `${(i / 23) * 880 + 10},${250 - ((pt.simulated_solar_kw || 0) / maxVal) * 220}`).join(' ');
+    const pointsOrig = intervals.map((pt, i) => `${(i / 23) * 880 + 10},${250 - (pt.net_grid_baseline_kw / maxVal) * 220}`).join(' ');
+    const pointsShift = intervals.map((pt, i) => `${(i / 23) * 880 + 10},${250 - (pt.optimal_grid_shifted_kw / maxVal) * 220}`).join(' ');
+    const pointsSolar = intervals.map((pt, i) => `${(i / 23) * 880 + 10},${250 - (pt.solar_minimized_kw / maxVal) * 220}`).join(' ');
 
     svg.innerHTML = `
       <polyline fill="none" stroke="#eab308" stroke-width="2" stroke-dasharray="3,3" points="${pointsSolar}" />
@@ -332,13 +442,13 @@ class EnterpriseEngine {
       const pt = intervals[idx];
 
       tooltip.classList.remove('hidden');
-      tooltip.style.left = `${Math.min(rect.width - 160, Math.max(10, e.clientX - rect.left))}px`;
+      tooltip.style.left = `${Math.min(rect.width - 190, Math.max(10, e.clientX - rect.left))}px`;
       tooltip.style.top = `10px`;
       tooltip.innerHTML = `
         <div class="text-slate-300 font-bold">${pt.timestamp}</div>
-        <div class="text-red-400">Baseline: ${pt.campus_demand_kw} kW</div>
-        <div class="text-emerald-400">Optimized: ${pt.shifted_demand_kw} kW</div>
-        <div class="text-yellow-400">Solar Gen: ${pt.simulated_solar_kw || 0} kW</div>
+        <div class="text-red-400">Net Baseline: ${pt.net_grid_baseline_kw} kW</div>
+        <div class="text-emerald-400">Optimal Shift: ${pt.optimal_grid_shifted_kw} kW</div>
+        <div class="text-yellow-400">Solar Offset: -${pt.solar_minimized_kw} kW</div>
       `;
     };
 
@@ -346,21 +456,18 @@ class EnterpriseEngine {
   }
 
   // =========================================================================
-  // MODEL EVOLUTION (Quantile Streaming & Isolation Forest)
+  // MODEL EVOLUTION VIEW
   // =========================================================================
   renderModelEvolution(container) {
     container.innerHTML = `
       <div class="space-y-6">
-        <!-- Control Header -->
         <div class="bg-slate-900 border border-slate-800 p-5 rounded-xl flex flex-col md:flex-row md:items-center justify-between gap-4">
           <div>
             <div class="flex items-center gap-2">
               <span class="w-3 h-3 rounded-full bg-emerald-400 animate-ping"></span>
-              <h2 class="text-base font-bold text-white font-mono">Model Evolution</h2>
+              <h2 class="text-base font-bold text-white font-mono">Model Evolution Engine</h2>
             </div>
-            <p class="text-xs text-slate-400 mt-1">
-              Live Quantile Gradient Boosting (P10–P90 bands) + Isolation Forest Stream scoring.
-            </p>
+            <p class="text-xs text-slate-400 mt-1">Live Quantile Gradient Boosting (P10–P90 bands) + Isolation Forest Stream scoring.</p>
           </div>
           <div class="flex items-center gap-3 font-mono text-xs">
             <span id="supabase-sync-badge" class="px-2.5 py-1 rounded bg-slate-950 border border-slate-800 text-emerald-400 text-[10px]">
@@ -375,7 +482,6 @@ class EnterpriseEngine {
           </div>
         </div>
 
-        <!-- Metrics -->
         <div class="grid grid-cols-1 md:grid-cols-4 gap-4 font-mono">
           <div class="bg-slate-900 border border-slate-800 p-4 rounded-xl border-l-4 border-l-cyan-500">
             <div class="text-xs text-slate-400">MEASURED STREAM LOAD</div>
@@ -399,7 +505,6 @@ class EnterpriseEngine {
           </div>
         </div>
 
-        <!-- Continuous Chart 1: Live XGBoost Quantile Variation Band -->
         <div class="bg-slate-900 border border-slate-800 p-5 rounded-xl">
           <div class="flex justify-between items-center mb-4">
             <div>
@@ -415,7 +520,6 @@ class EnterpriseEngine {
           <svg id="ml-continuous-svg" viewBox="0 0 900 240" class="w-full h-64 overflow-visible font-mono"></svg>
         </div>
 
-        <!-- Continuous Chart 2: Live Isolation Forest Anomaly Index -->
         <div class="bg-slate-900 border border-slate-800 p-5 rounded-xl">
           <div class="flex justify-between items-center mb-4">
             <div>
@@ -440,7 +544,7 @@ class EnterpriseEngine {
     };
 
     if (this.streamHistory.length === 0) {
-      const base = this.day.intervals[18].campus_demand_kw || 700;
+      const base = this.adjustedIntervals[18]?.net_grid_baseline_kw || 600;
       for (let i = 0; i < 25; i++) {
         this.streamSec += 1;
         const step = demandForecaster.computeStreamStep(this.streamSec, base);
@@ -458,7 +562,7 @@ class EnterpriseEngine {
       if (!this.isStreamRunning) return;
 
       this.streamSec += 1;
-      const baseLoad = this.day.intervals[18].campus_demand_kw || 720;
+      const baseLoad = this.adjustedIntervals[18]?.net_grid_baseline_kw || 620;
       
       const step = demandForecaster.computeStreamStep(this.streamSec, baseLoad);
       const voltage = 415 + (Math.random() - 0.5) * 18;
@@ -532,7 +636,7 @@ class EnterpriseEngine {
 
       upPath += `${i === 0 ? 'M' : 'L'} ${x} ${yP90} `;
       dnPath = `L ${x} ${yP10} ` + dnPath;
-      p50Path += `${i === 0 ? 'M' : 'L'} ${x} ${yP50} `;
+      p50Path += `${i === 0 ? 'M' : 'L'} ${x} ${y50Path ? yP50 : yP50} `;
       actPath += `${i === 0 ? 'M' : 'L'} ${x} ${yAct} `;
     });
 
@@ -562,23 +666,22 @@ class EnterpriseEngine {
   }
 
   // =========================================================================
-  // ANALYSIS VIEW (Interactive Graphs & Delta Breakdown)
+  // ANALYSIS VIEW
   // =========================================================================
   renderAnalysis(container) {
-    const m = this.simResult.metrics;
-    const intervals = this.simResult.shiftedIntervals;
+    const m = this.netMetrics;
+    const intervals = this.adjustedIntervals;
 
     container.innerHTML = `
       <div class="space-y-6">
         <div class="bg-slate-900 border border-slate-800 p-5 rounded-xl flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
           <div>
-            <h2 class="text-lg font-bold text-white font-mono">Load Shift Achieved Target & Variance Analysis</h2>
-            <p class="text-xs text-slate-400 mt-1">Empirical comparison of baseline versus dispatch target reductions across 24-hour cycle.</p>
+            <h2 class="text-lg font-bold text-white font-mono">Net Load Shift Target & Variance Analysis</h2>
+            <p class="text-xs text-slate-400 mt-1">Solar generation subtracted to isolate direct net grid relief metrics.</p>
           </div>
           <div class="flex gap-4 text-xs font-mono">
-            <span class="text-red-400">● Baseline (No Shift)</span>
+            <span class="text-red-400">● Net Grid Baseline</span>
             <span class="text-emerald-400">● Achieved Shift</span>
-            <span class="text-cyan-400">■ Delta Transferred</span>
           </div>
         </div>
 
@@ -586,30 +689,30 @@ class EnterpriseEngine {
           <div class="bg-slate-900 border border-slate-800 p-4 rounded-xl border-l-4 border-l-emerald-500">
             <div class="text-xs text-slate-400">ACHIEVED SHIFT TARGET</div>
             <div class="text-2xl font-bold text-emerald-400 mt-1">${m.reduction_percentage}% Cut</div>
-            <div class="text-[11px] text-slate-400 mt-1">Peak Target Band: 15% - 25%</div>
+            <div class="text-[11px] text-slate-400 mt-1">Net Grid Peak Band</div>
           </div>
           <div class="bg-slate-900 border border-slate-800 p-4 rounded-xl border-l-4 border-l-red-500">
             <div class="text-xs text-slate-400">NET PEAK REDUCTION</div>
             <div class="text-2xl font-bold text-white mt-1">-${m.peak_reduction_kw} kW</div>
-            <div class="text-[11px] text-emerald-400 mt-1">From ${m.original_peak} to ${m.shifted_peak} kW</div>
+            <div class="text-[11px] text-emerald-400 mt-1">From ${m.net_baseline_peak} to ${m.optimal_shifted_peak} kW</div>
           </div>
           <div class="bg-slate-900 border border-slate-800 p-4 rounded-xl border-l-4 border-l-cyan-500">
             <div class="text-xs text-slate-400">TOTAL ENERGY SHIFTED</div>
             <div class="text-2xl font-bold text-cyan-400 mt-1">${m.total_shifted_kwh} kWh</div>
-            <div class="text-[11px] text-slate-400 mt-1">Zero Net Loss (Conserved)</div>
+            <div class="text-[11px] text-slate-400 mt-1">Conserved Energy Transfer</div>
           </div>
           <div class="bg-slate-900 border border-slate-800 p-4 rounded-xl border-l-4 border-l-yellow-500">
-            <div class="text-xs text-slate-400">SOLAR INTEGRATION</div>
-            <div class="text-2xl font-bold text-yellow-400 mt-1">${m.solar_shift_pct}%</div>
-            <div class="text-[11px] text-yellow-300 mt-1">Absorbed in 10:00-15:00 Window</div>
+            <div class="text-xs text-slate-400">SOLAR OFFSET CONSUMED</div>
+            <div class="text-2xl font-bold text-yellow-400 mt-1">${m.total_solar_kwh} kWh</div>
+            <div class="text-[11px] text-yellow-300 mt-1">Direct Midday Offset</div>
           </div>
         </div>
 
         <div class="bg-slate-900 border border-slate-800 p-5 rounded-xl">
           <div class="flex justify-between items-center mb-4">
             <div>
-              <h3 class="text-sm font-semibold text-white font-mono">1. 24-Hour Target Peak Reduction Curve</h3>
-              <p class="text-xs text-slate-400">Hover over points to inspect baseline versus shifted demand at any timestamp.</p>
+              <h3 class="text-sm font-semibold text-white font-mono">24-Hour Net Grid Shift Curve</h3>
+              <p class="text-xs text-slate-400">Hover for Net Baseline vs Optimal Grid values at each hour.</p>
             </div>
             <div id="analysis-hover-readout" class="text-xs font-mono text-emerald-400 bg-slate-950 px-3 py-1 rounded border border-slate-800">
               Hover over graph
@@ -619,80 +722,18 @@ class EnterpriseEngine {
             <svg id="analysis-load-svg" viewBox="0 0 900 250" class="w-full h-64 overflow-visible font-mono cursor-crosshair"></svg>
           </div>
         </div>
-
-        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          <div class="bg-slate-900 border border-slate-800 p-5 rounded-xl">
-            <h3 class="text-sm font-semibold text-white font-mono mb-2">2. Hourly Energy Shift Variance (kW Delta)</h3>
-            <p class="text-xs text-slate-400 mb-4">Green bars indicate solar pre-charge absorption; Red bars represent evening curtailment.</p>
-            <svg id="analysis-delta-svg" viewBox="0 0 450 200" class="w-full h-48 overflow-visible font-mono"></svg>
-          </div>
-
-          <div class="bg-slate-900 border border-slate-800 p-5 rounded-xl flex flex-col justify-between">
-            <div>
-              <h3 class="text-sm font-semibold text-white font-mono mb-2">3. Feeder-Wise Target Compliance Status</h3>
-              <p class="text-xs text-slate-400 mb-4">Measured shift participation ratio against safety limits.</p>
-              
-              <div class="space-y-4 font-mono text-xs">
-                <div>
-                  <div class="flex justify-between text-slate-300 mb-1">
-                    <span>Pumping Infrastructure (Flexible)</span>
-                    <span class="text-cyan-400 font-bold">85% Achieved</span>
-                  </div>
-                  <div class="w-full bg-slate-950 h-3 rounded-full overflow-hidden border border-slate-800">
-                    <div class="bg-cyan-500 h-full rounded-full" style="width: 85%"></div>
-                  </div>
-                </div>
-
-                <div>
-                  <div class="flex justify-between text-slate-300 mb-1">
-                    <span>EV Fast Charging Plaza (Flexible)</span>
-                    <span class="text-emerald-400 font-bold">50% Achieved</span>
-                  </div>
-                  <div class="w-full bg-slate-950 h-3 rounded-full overflow-hidden border border-slate-800">
-                    <div class="bg-emerald-500 h-full rounded-full" style="width: 50%"></div>
-                  </div>
-                </div>
-
-                <div>
-                  <div class="flex justify-between text-slate-300 mb-1">
-                    <span>Hostel Thermal Water Tanks (Conditional)</span>
-                    <span class="text-amber-400 font-bold">25% Achieved</span>
-                  </div>
-                  <div class="w-full bg-slate-950 h-3 rounded-full overflow-hidden border border-slate-800">
-                    <div class="bg-amber-500 h-full rounded-full" style="width: 25%"></div>
-                  </div>
-                </div>
-
-                <div>
-                  <div class="flex justify-between text-slate-300 mb-1">
-                    <span>Mission-Critical Labs & Server Room</span>
-                    <span class="text-red-400 font-bold">0% (Hardware Locked)</span>
-                  </div>
-                  <div class="w-full bg-slate-950 h-3 rounded-full overflow-hidden border border-slate-800">
-                    <div class="bg-red-500 h-full rounded-full" style="width: 0%"></div>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div class="mt-4 pt-3 border-t border-slate-800 text-[11px] font-mono text-slate-400">
-              Constraint Rule: Rebound guard verified; zero secondary spikes detected.
-            </div>
-          </div>
-        </div>
       </div>
     `;
 
-    this.drawAnalysisGraphs(intervals, m);
+    this.drawAnalysisGraph(intervals);
   }
 
-  drawAnalysisGraphs(intervals, m) {
+  drawAnalysisGraph(intervals) {
     const loadSvg = document.getElementById('analysis-load-svg');
-    const deltaSvg = document.getElementById('analysis-delta-svg');
     const readout = document.getElementById('analysis-hover-readout');
-    if (!loadSvg || !deltaSvg) return;
+    if (!loadSvg) return;
 
-    const maxVal = Math.max(...intervals.map(i => Math.max(i.campus_demand_kw, i.shifted_demand_kw))) * 1.1;
+    const maxVal = Math.max(...intervals.map(i => Math.max(i.net_grid_baseline_kw, i.optimal_grid_shifted_kw))) * 1.15;
     const getX = (idx) => (idx / 23) * 860 + 20;
     const getY = (val) => 220 - (val / maxVal) * 190;
 
@@ -701,14 +742,12 @@ class EnterpriseEngine {
 
     intervals.forEach((pt, i) => {
       const x = getX(i);
-      origPoly += `${x},${getY(pt.campus_demand_kw)} `;
-      shiftPoly += `${x},${getY(pt.shifted_demand_kw)} `;
+      origPoly += `${x},${getY(pt.net_grid_baseline_kw)} `;
+      shiftPoly += `${x},${getY(pt.optimal_grid_shifted_kw)} `;
     });
 
     loadSvg.innerHTML = `
       <rect x="${getX(17)}" y="20" width="${getX(20) - getX(17)}" height="200" fill="rgba(239, 68, 68, 0.08)" stroke="rgba(239, 68, 68, 0.25)" stroke-dasharray="4,4" />
-      <text x="${(getX(17) + getX(20)) / 2}" y="35" fill="#f87171" font-size="11" text-anchor="middle">PEAK REDUCTION WINDOW</text>
-
       <line x1="20" y1="30" x2="880" y2="30" stroke="#1e293b" stroke-width="1" />
       <line x1="20" y1="125" x2="880" y2="125" stroke="#1e293b" stroke-width="1" />
       <line x1="20" y1="220" x2="880" y2="220" stroke="#1e293b" stroke-width="1" />
@@ -736,10 +775,7 @@ class EnterpriseEngine {
         crosshair.setAttribute('x2', cx);
         crosshair.classList.remove('hidden');
 
-        const delta = Number((pt.shifted_demand_kw - pt.campus_demand_kw).toFixed(1));
-        const deltaText = delta < 0 ? `Reduced by ${Math.abs(delta)} kW` : (delta > 0 ? `Shifted in +${delta} kW` : `0 kW change`);
-        
-        readout.innerHTML = `Time: <strong>${pt.timestamp}</strong> | Base: <span class="text-red-400">${pt.campus_demand_kw} kW</span> | Achieved: <span class="text-emerald-400">${pt.shifted_demand_kw} kW</span> (${deltaText})`;
+        readout.innerHTML = `Time: <strong>${pt.timestamp}</strong> | Net Base: <span class="text-red-400">${pt.net_grid_baseline_kw} kW</span> | Optimal: <span class="text-emerald-400">${pt.optimal_grid_shifted_kw} kW</span>`;
       };
 
       hit.onmouseleave = () => {
@@ -747,30 +783,6 @@ class EnterpriseEngine {
         readout.textContent = 'Hover over graph';
       };
     }
-
-    const deltas = intervals.map(pt => pt.shifted_demand_kw - pt.campus_demand_kw);
-    const maxDelta = Math.max(...deltas.map(d => Math.abs(d)), 40);
-    const zeroY = 100;
-
-    let barsSvg = `
-      <line x1="20" y1="${zeroY}" x2="430" y2="${zeroY}" stroke="#475569" stroke-width="1" />
-      <text x="15" y="${zeroY + 3}" fill="#94a3b8" font-size="9" text-anchor="end">0</text>
-    `;
-
-    deltas.forEach((d, i) => {
-      const x = (i / 24) * 400 + 25;
-      const h = (Math.abs(d) / maxDelta) * 80;
-      const y = d < 0 ? zeroY : zeroY - h;
-      const color = d < 0 ? '#ef4444' : '#10b981';
-
-      barsSvg += `
-        <rect x="${x}" y="${y}" width="12" height="${Math.max(2, h)}" fill="${color}" rx="1">
-          <title>${intervals[i].timestamp}: ${d > 0 ? '+' : ''}${d.toFixed(1)} kW</title>
-        </rect>
-      `;
-    });
-
-    deltaSvg.innerHTML = barsSvg;
   }
 
   // =========================================================================
