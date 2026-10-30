@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PeakShift Console</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-[#0b0f17] text-slate-100 min-h-screen font-sans flex flex-col antialiased select-none">
+
+  <!-- ================= AUTHENTICATION GATE SCREEN ================= -->
+  <div id="login-screen" class="fixed inset-0 z-50 flex items-center justify-center bg-[#0b0f17] p-4">
+    <div class="w-full max-w-md bg-slate-900 border border-slate-800 rounded-2xl p-8 shadow-2xl space-y-6">
+      <div class="text-center space-y-2">
+        <div class="inline-flex items-center justify-center w-12 h-12 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-xl font-bold">
+          ⚡
+        </div>
+        <h2 class="text-xl font-bold tracking-tight text-white font-mono">PEAKSHIFT ACCESS PORTAL</h2>
+        <p class="text-xs text-slate-400">Restricted Operations Terminal. Authenticate to proceed.</p>
+      </div>
+
+      <form id="auth-form" class="space-y-4 font-mono text-xs">
+        <div id="auth-error-msg" class="hidden p-3 rounded-lg bg-red-500/10 border border-red-500/30 text-red-400 text-[11px] font-medium text-center"></div>
+
+        <div>
+          <label class="block text-slate-400 mb-1">Operator ID / Username</label>
+          <input type="text" id="login-username" required autocomplete="username" placeholder="operator_admin" class="w-full bg-slate-950 border border-slate-800 rounded-lg px-3.5 py-2.5 text-white focus:outline-none focus:border-emerald-500 transition" />
+        </div>
+
+        <div>
+          <label class="block text-slate-400 mb-1">Security Key / Password</label>
+          <input type="password" id="login-password" required autocomplete="current-password" placeholder="••••••••••••" class="w-full bg-slate-950 border border-slate-800 rounded-lg px-3.5 py-2.5 text-white focus:outline-none focus:border-emerald-500 transition" />
+        </div>
+
+        <button type="submit" class="w-full py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-lg transition shadow-lg shadow-emerald-600/20 text-xs tracking-wider uppercase">
+          Verify & Unlock Console
+        </button>
+
+        <div class="pt-2 text-center text-[10px] text-slate-500">
+          Default Key: <span class="text-slate-400">admin</span> / <span class="text-slate-400">peakshift2026</span>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- ================= PROTECTED WORKSPACE ================= -->
+  <div id="app-workspace-container" class="hidden min-h-screen flex flex-col">
+    <!-- Header -->
+    <header class="h-16 border-b border-slate-800 bg-[#111827]/90 px-6 flex items-center justify-between sticky top-0 z-40">
+      <div class="flex items-center gap-3">
+        <span class="h-3 w-3 rounded-full bg-emerald-500 animate-pulse"></span>
+        <h1 class="text-base font-bold text-white tracking-wide font-mono">PEAKSHIFT CONSOLE</h1>
+      </div>
+
+      <!-- Date selector -->
+      <div class="flex items-center gap-2 text-xs font-mono">
+        <span class="text-slate-400">Date:</span>
+        <select id="global-date-select" class="bg-slate-900 border border-slate-800 text-emerald-400 rounded px-2 py-1 outline-none"></select>
+      </div>
+
+      <!-- Navigation Links -->
+      <nav class="flex gap-3 text-xs font-medium items-center">
+        <button id="nav-dash" class="text-slate-300 hover:text-white px-2 py-1">Dashboard</button>
+        <button id="nav-ml" class="text-emerald-400 hover:text-emerald-300 bg-emerald-500/10 border border-emerald-500/30 px-2.5 py-1 rounded font-mono">Model Evolution</button>
+        <button id="nav-analysis" class="text-slate-300 hover:text-white px-2 py-1">Analysis</button>
+        <button id="nav-appr" class="text-slate-300 hover:text-white px-2 py-1">Approvals</button>
+        <button id="nav-prof" class="text-slate-300 hover:text-white px-2 py-1">Profile</button>
+        <button id="btn-logout" class="bg-red-500/10 hover:bg-red-500/20 text-red-400 border border-red-500/30 px-3 py-1 rounded font-mono transition">Logout</button>
+      </nav>
+    </header>
+
+    <!-- Main Workspace Area -->
+    <main class="flex-1 p-6 max-w-7xl mx-auto w-full">
+      <div id="main-workspace"></div>
+    </main>
+  </div>
+
+  <script type="module" src="/js/app.js"></script>
+</body>
+</html>
